@@ -31,8 +31,8 @@ class AuthController extends Controller
     // Champs CONSUMER
     if ($userType === 'consumer') {
         $rules = array_merge($rules, [
-            'firstName' => 'required|string|max:255',
-            'lastName'  => 'required|string|max:255',
+            'first_name' => 'required|string|max:255',
+            'last_name'  => 'required|string|max:255',
             'city'      => 'required|string|max:255',
         ]);
     }
