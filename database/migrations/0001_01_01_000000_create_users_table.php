@@ -8,28 +8,56 @@ return new class extends Migration
     public function up(): void
     {
         Schema::connection('mongodb')->create('users', function ($collection) {
-            $collection->string('name');
-            $collection->string('email');
+
+            /* ------------------------------
+             | Identité
+             |------------------------------*/
+            $collection->string('first_name');
+            $collection->string('last_name');
+            $collection->string('email')->unique();
             $collection->string('password');
             $collection->string('phone')->nullable();
             $collection->string('avatar')->nullable();
-            $collection->string('role')->default('consumer'); // enum remplacé par string
-            $collection->string('status')->default('active'); // enum remplacé par string
+
+            /* ------------------------------
+             | Rôle & statut
+             |------------------------------*/
+            $collection->string('role')->default('consumer'); // consumer | producer | admin
+            $collection->string('status')->default('active'); // active | suspended
+            $collection->boolean('is_verified')->default(false);
+
+            /* ------------------------------
+             | Localisation (consumer)
+             |------------------------------*/
             $collection->string('address')->nullable();
             $collection->string('city')->nullable();
             $collection->string('postal_code')->nullable();
             $collection->string('country')->default('Gabon');
             $collection->string('region')->nullable();
-            $collection->string('bio')->nullable(); // text() remplacé par string()
+
+            /* ------------------------------
+             | Producteur
+             |------------------------------*/
             $collection->string('business_name')->nullable();
-            $collection->string('business_registration')->nullable();
-            $collection->string('tax_id')->nullable();
-            $collection->string('bank_account')->nullable();
+            $collection->string('province')->nullable();
+            $collection->string('production_city')->nullable();
+            $collection->string('production_village')->nullable();
+
+            // Tableau (sera casté en array dans le model)
+            $collection->json('production_types')->nullable();
+
+            $collection->string('identity_document')->nullable(); // chemin du fichier
             $collection->string('mobile_money_number')->nullable();
-            $collection->boolean('is_verified')->default(false);
+            $collection->string('bank_account')->nullable();
+            $collection->string('tax_id')->nullable();
+
+            /* ------------------------------
+             | Métadonnées
+             |------------------------------*/
             $collection->timestamp('email_verified_at')->nullable();
             $collection->timestamp('phone_verified_at')->nullable();
             $collection->timestamp('last_login_at')->nullable();
+
             $collection->timestamps();
         });
     }
@@ -39,4 +67,3 @@ return new class extends Migration
         Schema::connection('mongodb')->dropIfExists('users');
     }
 };
-

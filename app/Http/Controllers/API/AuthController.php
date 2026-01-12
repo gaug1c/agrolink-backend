@@ -13,106 +13,111 @@ use Tymon\JWTAuth\Facades\JWTAuth;
 class AuthController extends Controller
 {
     public function register(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:8|confirmed',
+{
+    // Déterminer le type d'utilisateur
+    $userType = $request->input('userType', 'consumer');
+
+    /** -------------------
+     *  VALIDATION
+     *  -------------------
+     */
+    $rules = [
+        'userType' => 'required|in:consumer,producer',
+        'email' => 'required|email|unique:users,email',
+        'password' => 'required|min:6|confirmed',
+        'phone' => 'nullable|string',
+    ];
+
+    // Champs CONSUMER
+    if ($userType === 'consumer') {
+        $rules = array_merge($rules, [
+            'firstName' => 'required|string|max:255',
+            'lastName'  => 'required|string|max:255',
+            'city'      => 'required|string|max:255',
         ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'phone' => $request->phone ?? null,
-            'role' => 'consumer',
-            'status' => 'active',
-            'country' => 'Gabon',
-            'is_verified' => false,
-            'email_verified_at' => null,
-            'phone_verified_at' => null,
-            'last_login_at' => null,
-        ]);
-
-
-        // Création d'un token JWT
-        $token = JWTAuth::fromUser($user);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'User registered successfully',
-            'data' => [
-                'user' => $user,
-                'access_token' => $token,
-                'token_type' => 'Bearer',
-            ]
-        ], 201);
     }
 
-   public function login(Request $request)
-{
-    $validator = Validator::make($request->all(), [
-        'email' => 'required|email',
-        'password' => 'required',
-    ]);
+    // Champs PRODUCER
+    if ($userType === 'producer') {
+        $rules = array_merge($rules, [
+            'responsibleFirstName' => 'nullable|string|max:255',
+            'responsibleLastName'  => 'required|string|max:255',
+            'province'             => 'required|string|max:255',
+            'productionTypes'      => 'required',
+            'producerPhone'        => 'required|string',
+            'identityDocument'     => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
+        ]);
+    }
+
+    $validator = Validator::make($request->all(), $rules);
 
     if ($validator->fails()) {
         return response()->json([
             'success' => false,
-            'errors' => $validator->errors()
+            'errors' => $validator->errors(),
         ], 422);
     }
 
-    $credentials = $request->only('email', 'password');
-
-    if (! $token = JWTAuth::attempt($credentials)) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Invalid credentials'
-        ], 401);
+    /** -------------------
+     *  GESTION DU NOM
+     *  -------------------
+     */
+    if ($userType === 'consumer') {
+        $firstName = $request->firstName;
+        $lastName  = $request->lastName;
+    } else {
+        $firstName = $request->responsibleFirstName ?? '';
+        $lastName  = $request->responsibleLastName;
     }
+
+    /** -------------------
+     *  UPLOAD FICHIER
+     *  -------------------
+     */
+    $identityPath = null;
+    if ($request->hasFile('identityDocument')) {
+        $identityPath = $request->file('identityDocument')
+            ->store('identity_documents', 'public');
+    }
+
+    /** -------------------
+     *  CRÉATION USER
+     *  -------------------
+     */
+    $user = User::create([
+        'first_name' => $firstName,
+        'last_name'  => $lastName,
+        'email'      => $request->email,
+        'password'   => Hash::make($request->password),
+        'phone'      => $request->phone ?? $request->producerPhone,
+        'role'       => $userType,
+        'status'     => 'active',
+        'country'    => 'Gabon',
+
+        // Producer specific
+        'company_name'      => $request->structureName,
+        'province'          => $request->province,
+        'production_city'   => $request->productionCity,
+        'production_village'=> $request->productionVillage,
+        'production_types'  => $request->productionTypes,
+        'identity_document' => $identityPath,
+    ]);
+
+    /** -------------------
+     *  JWT TOKEN
+     *  -------------------
+     */
+    $token = JWTAuth::fromUser($user);
 
     return response()->json([
         'success' => true,
-        'message' => 'Login successful',
+        'message' => 'Inscription réussie',
         'data' => [
-            'user' => auth()->user(),
-            'access_token' => $token,
+            'user' => $user,
+            'token' => $token,
             'token_type' => 'Bearer',
         ]
-    ]);
+    ], 201);
 }
 
-
-    public function logout(Request $request)
-{
-    try {
-        JWTAuth::invalidate(JWTAuth::getToken());
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Logged out successfully'
-        ]);
-    } catch (\Tymon\JWTAuth\Exceptions\JWTException $e) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Failed to logout, token invalid'
-        ], 400);
-    }
-}
-
-    public function user(Request $request)
-    {
-        return response()->json([
-            'success' => true,
-            'data' => $request->user()
-        ]);
-    }
 }
