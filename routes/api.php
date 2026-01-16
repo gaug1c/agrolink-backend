@@ -1,6 +1,5 @@
 <?php
 
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\AuthController;
 use App\Http\Controllers\API\ProductController;
@@ -18,12 +17,11 @@ use App\Http\Controllers\API\CategoryController;
 // Routes publiques (sans authentification)
 // ============================================
 
-// route de test de connexion
 Route::get('/test', function () {
-    return response()->json([
-        'message' => 'Connexion React ↔ Laravel OK 🚀'
-    ]);
+    \Log::info('Route /api/test appelée'); // devrait logguer
+    return response()->json(['message' => 'Test OK']);
 });
+
 
 // Authentication
 Route::prefix('auth')->group(function () {
@@ -53,9 +51,7 @@ Route::prefix('products')->group(function () {
 // Routes protégées (authentification requise)
 // ============================================
 
-Route::middleware('auth:sanctum')->group(function () {
-    
-    // Authentication
+Route::middleware('jwt.auth')->group(function () {
     Route::prefix('auth')->group(function () {
         Route::post('/logout', [AuthController::class, 'logout']);
         Route::get('/user', [AuthController::class, 'user']);
