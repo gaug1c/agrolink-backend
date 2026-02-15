@@ -10,20 +10,10 @@ return new class extends Migration {
             $collection->string('user_id');
             $collection->timestamps();
         });
-
     }
 
     public function down(): void
     {
-        Schema::connection('mongodb')->dropIfExists('cache');
+        Schema::connection('mongodb')->dropIfExists('carts');
     }
 };
-
-
-
-
-
-
-
-
-

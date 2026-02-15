@@ -10,33 +10,28 @@ use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
+use MongoDB\BSON\ObjectId;
 
 class OrderController extends Controller
 {
-    /**
-     * Afficher l'historique des commandes
-     * Adapté pour l'application agrolink Gabon
-     */
+    // Afficher l'historique des commandes
     public function index(Request $request)
     {
         $query = Order::with('items.product')
-            ->where('user_id', $request->user()->id);
+            ->where('user_id', $request->user()->_id);
 
-        // Filtrer par statut
         if ($request->has('status')) {
             $query->where('status', $request->status);
         }
 
-        // Filtrer par période
         if ($request->has('from_date')) {
-            $query->whereDate('created_at', '>=', $request->from_date);
+            $query->where('created_at', '>=', $request->from_date);
         }
         if ($request->has('to_date')) {
-            $query->whereDate('created_at', '<=', $request->to_date);
+            $query->where('created_at', '<=', $request->to_date);
         }
 
-        $orders = $query->orderBy('created_at', 'desc')
-            ->paginate(10);
+        $orders = $query->orderBy('created_at', 'desc')->paginate(10);
 
         return response()->json([
             'success' => true,
@@ -46,14 +41,19 @@ class OrderController extends Controller
         ]);
     }
 
-    /**
-     * Afficher les détails d'une commande
-     */
+    // Afficher les détails d'une commande
     public function show(Request $request, $id)
     {
-        $order = Order::with('items.product.category', 'payment')
-            ->where('user_id', $request->user()->id)
-            ->find($id);
+        try {
+            $order = Order::with('items.product.category', 'payment')
+                ->where('user_id', $request->user()->_id)
+                ->find(new ObjectId($id));
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'ID de commande invalide'
+            ], 400);
+        }
 
         if (!$order) {
             return response()->json([
@@ -70,28 +70,22 @@ class OrderController extends Controller
         ]);
     }
 
-    /**
-     * Créer une nouvelle commande à partir du panier
-     */
+    // Créer une nouvelle commande à partir du panier
+    // Version DÉVELOPPEMENT sans transactions MongoDB
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'shipping_address' => 'required|string',
+            'shipping_address' => 'required|string|max:255',
             'shipping_city' => 'required|string|in:Libreville,Port-Gentil,Franceville,Oyem,Moanda,Mouila,Lambaréné,Tchibanga,Koulamoutou,Makokou',
-            'shipping_postal_code' => 'nullable|string',
-            'shipping_country' => 'required|string',
-            'phone' => 'required|string|regex:/^((\+241|00241)?[0-9]{8,9})$/',
-            'delivery_instructions' => 'nullable|string',
+            'shipping_postal_code' => 'nullable|string|max:10',
+            'shipping_country' => 'required|string|max:100',
+            'phone' => [
+                'required',
+                'string',
+                'regex:#^(\+241|00241)?[0-9]{8,9}$#'
+            ],
+            'delivery_instructions' => 'nullable|string|max:500',
             'payment_method' => 'required|in:card,mobile_money,bank_transfer,cash_on_delivery'
-        ], [
-            'shipping_address.required' => 'L\'adresse de livraison est obligatoire',
-            'shipping_city.required' => 'La ville de livraison est obligatoire',
-            'shipping_city.in' => 'Cette ville n\'est pas dans notre zone de livraison',
-            'shipping_country.required' => 'Le pays est obligatoire',
-            'phone.required' => 'Le numéro de téléphone est obligatoire',
-            'phone.regex' => 'Le format du numéro de téléphone est invalide (ex: +24177123456 ou 07123456)',
-            'payment_method.required' => 'Le mode de paiement est obligatoire',
-            'payment_method.in' => 'Ce mode de paiement n\'est pas accepté'
         ]);
 
         if ($validator->fails()) {
@@ -102,7 +96,10 @@ class OrderController extends Controller
             ], 422);
         }
 
-        $cart = Cart::with('items.product')->where('user_id', $request->user()->id)->first();
+        // Récupérer le panier avec les produits
+        $cart = Cart::with('items.product')
+            ->where('user_id', $request->user()->_id)
+            ->first();
 
         if (!$cart || $cart->items->isEmpty()) {
             return response()->json([
@@ -111,34 +108,48 @@ class OrderController extends Controller
             ], 422);
         }
 
-        // Vérifier la disponibilité du stock
+        // Vérifier la disponibilité du stock pour tous les produits
+        $stockErrors = [];
         foreach ($cart->items as $item) {
+            if (!$item->product) {
+                $stockErrors[] = "Produit introuvable dans le panier";
+                continue;
+            }
+            
             if ($item->product->stock < $item->quantity) {
-                return response()->json([
-                    'success' => false,
-                    'message' => "Stock insuffisant pour le produit: {$item->product->name}. Stock disponible: {$item->product->stock}"
-                ], 422);
+                $stockErrors[] = "{$item->product->name}: stock insuffisant (disponible: {$item->product->stock}, demandé: {$item->quantity})";
             }
         }
 
-        DB::beginTransaction();
+        if (!empty($stockErrors)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Stock insuffisant pour certains produits',
+                'errors' => $stockErrors
+            ], 422);
+        }
 
         try {
-            // Calculer les montants
+            // Calculer les montants - CONVERSION DECIMAL128 EN FLOAT
             $subtotal = 0;
-            $shippingCost = 0;
-            
+            $productShippingCost = 0;
+
             foreach ($cart->items as $item) {
+                // Convertir Decimal128 en float si nécessaire
                 $price = $item->product->discount_price ?? $item->product->price;
-                $subtotal += $item->quantity * $price;
+                $price = $this->toFloat($price);
                 
-                // Frais de livraison
+                $quantity = (int) $item->quantity;
+                $subtotal += $quantity * $price;
+
+                // Frais de livraison spécifiques au produit
                 if ($item->product->shipping_cost) {
-                    $shippingCost += $item->product->shipping_cost;
+                    $shippingCost = $this->toFloat($item->product->shipping_cost);
+                    $productShippingCost += $shippingCost;
                 }
             }
-            // TODO :à modifier les prix de la livraison
-            // Frais de livraison selon la ville
+
+            // Frais de livraison par ville
             $cityShippingCosts = [
                 'Libreville' => 2000,
                 'Port-Gentil' => 5000,
@@ -153,12 +164,17 @@ class OrderController extends Controller
             ];
 
             $baseShippingCost = $cityShippingCosts[$request->shipping_city] ?? 5000;
-            $totalShippingCost = $shippingCost + $baseShippingCost;
+            $totalShippingCost = $productShippingCost + $baseShippingCost;
             $totalAmount = $subtotal + $totalShippingCost;
+
+            // Arrondir à 2 décimales
+            $subtotal = round($subtotal, 2);
+            $totalShippingCost = round($totalShippingCost, 2);
+            $totalAmount = round($totalAmount, 2);
 
             // Créer la commande
             $order = Order::create([
-                'user_id' => $request->user()->id,
+                'user_id' => $request->user()->_id,
                 'order_number' => 'CMD-' . strtoupper(uniqid()),
                 'subtotal' => $subtotal,
                 'shipping_cost' => $totalShippingCost,
@@ -171,57 +187,130 @@ class OrderController extends Controller
                 'shipping_postal_code' => $request->shipping_postal_code,
                 'shipping_country' => $request->shipping_country ?? 'Gabon',
                 'phone' => $request->phone,
-                'delivery_instructions' => $request->delivery_instructions
+                'delivery_instructions' => $request->delivery_instructions,
+                'ip_address' => $request->ip(),
+                'user_agent' => $request->userAgent(),
+                'created_at' => now(),
+                'updated_at' => now()
             ]);
 
             // Créer les items de commande et mettre à jour le stock
+            $orderItems = [];
             foreach ($cart->items as $item) {
                 $price = $item->product->discount_price ?? $item->product->price;
-                
-                OrderItem::create([
-                    'order_id' => $order->id,
+                $price = $this->toFloat($price);
+                $quantity = (int) $item->quantity;
+
+                // Vérifier à nouveau le stock (protection contre les conditions de course)
+                if ($item->product->stock < $quantity) {
+                    // Annuler la commande si stock insuffisant
+                    $order->delete();
+                    throw new \Exception("Stock insuffisant pour {$item->product->name}");
+                }
+
+                $subtotalItem = round($quantity * $price, 2);
+
+                $orderItem = OrderItem::create([
+                    'order_id' => $order->_id,
                     'product_id' => $item->product_id,
-                    'quantity' => $item->quantity,
+                    'product_name' => $item->product->name,
+                    'product_sku' => $item->product->sku ?? null,
+                    'product_image' => $item->product->image ?? null,
+                    'quantity' => $quantity,
                     'price' => $price,
-                    'subtotal' => $item->quantity * $price
+                    'subtotal' => $subtotalItem,
+                    'created_at' => now(),
+                    'updated_at' => now()
                 ]);
 
-                // Décrémenter le stock
-                $item->product->decrement('stock', $item->quantity);
+                $orderItems[] = $orderItem;
+
+                // Décrémenter le stock de manière atomique
+                $item->product->decrement('stock', $quantity);
+                
+                // Incrémenter le nombre de ventes
+                $item->product->increment('sales_count', $quantity);
             }
 
             // Vider le panier
             $cart->items()->delete();
 
-            DB::commit();
+            // Marquer le panier comme converti
+            $cart->update([
+                'converted_to_order_id' => $order->_id,
+                'converted_at' => now()
+            ]);
 
-            $order->load('items.product');
+            // Charger les relations pour la réponse
+            $order->load('items.product', 'user');
+
+            // Déclencher les événements (optionnel en dev)
+            // event(new \App\Events\OrderCreated($order));
+
+            // Envoyer les notifications (désactivé en dev)
+            if (config('app.env') === 'production') {
+                try {
+                    \Mail::to($request->user()->email)->queue(
+                        new \App\Mail\OrderConfirmation($order)
+                    );
+
+                    \Notification::send(
+                        \App\Models\User::where('role', 'admin')->get(),
+                        new \App\Notifications\NewOrderNotification($order)
+                    );
+                } catch (\Exception $e) {
+                    \Log::warning('Erreur envoi notification commande', [
+                        'order_id' => $order->_id,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
 
             return response()->json([
                 'success' => true,
                 'message' => 'Commande créée avec succès',
-                'data' => $order,
-                'currency' => 'FCFA',
-                'next_step' => 'Procéder au paiement'
+                'data' => [
+                    'order' => $order,
+                    'items_count' => count($orderItems),
+                    'currency' => 'FCFA',
+                    'estimated_delivery' => $this->calculateEstimatedDelivery($request->shipping_city)
+                ],
+                'next_step' => $request->payment_method === 'cash_on_delivery' 
+                    ? 'Commande confirmée - Paiement à la livraison' 
+                    : 'Procéder au paiement',
+                'payment_url' => $request->payment_method !== 'cash_on_delivery'
+                    ? route('payment.process', ['order' => $order->_id])
+                    : null
             ], 201);
 
         } catch (\Exception $e) {
-            DB::rollBack();
-            
+            \Log::error('Erreur création commande', [
+                'user_id' => $request->user()->_id,
+                'cart_id' => $cart->_id ?? null,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Erreur lors de la création de la commande',
-                'error' => $e->getMessage()
+                'error' => config('app.debug') ? $e->getMessage() : 'Une erreur est survenue. Veuillez réessayer.'
             ], 500);
         }
     }
 
-    /**
-     * Annuler une commande
-     */
+    // Annuler une commande
     public function cancel(Request $request, $id)
     {
-        $order = Order::where('user_id', $request->user()->id)->find($id);
+        try {
+            $order = Order::where('user_id', $request->user()->_id)
+                ->find(new ObjectId($id));
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'ID de commande invalide'
+            ], 400);
+        }
 
         if (!$order) {
             return response()->json([
@@ -230,30 +319,27 @@ class OrderController extends Controller
             ], 404);
         }
 
-        // Vérifier si la commande peut être annulée
         if (!in_array($order->status, ['pending', 'processing', 'confirmed'])) {
             return response()->json([
                 'success' => false,
-                'message' => 'Cette commande ne peut plus être annulée. Statut actuel: ' . $order->status
+                'message' => 'Cette commande ne peut plus être annulée'
             ], 422);
         }
 
-        DB::beginTransaction();
-
         try {
-            // Restaurer le stock des produits
+            // Restaurer le stock
             foreach ($order->items as $item) {
-                $item->product->increment('stock', $item->quantity);
+                if ($item->product) {
+                    $item->product->increment('stock', $item->quantity);
+                    $item->product->decrement('sales_count', $item->quantity);
+                }
             }
 
-            // Mettre à jour le statut
             $order->update([
                 'status' => 'cancelled',
                 'cancelled_at' => now(),
                 'cancellation_reason' => $request->reason ?? 'Annulé par le client'
             ]);
-
-            DB::commit();
 
             return response()->json([
                 'success' => true,
@@ -262,23 +348,63 @@ class OrderController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            DB::rollBack();
-            
+            \Log::error('Erreur annulation commande', [
+                'order_id' => $id,
+                'error' => $e->getMessage()
+            ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Erreur lors de l\'annulation de la commande',
-                'error' => $e->getMessage()
+                'error' => config('app.debug') ? $e->getMessage() : 'Une erreur est survenue'
             ], 500);
         }
     }
 
-    /**
-     * Suivre une commande
-     */
+    // Confirmer la livraison
+    public function confirmDelivery(Request $request, $id)
+    {
+        try {
+            $order = Order::where('user_id', $request->user()->_id)
+                ->find(new ObjectId($id));
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'ID de commande invalide'
+            ], 400);
+        }
+
+        if (!$order) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Commande non trouvée'
+            ], 404);
+        }
+
+        if ($order->status !== 'shipped') {
+            return response()->json([
+                'success' => false,
+                'message' => 'La commande n\'a pas encore été expédiée'
+            ], 422);
+        }
+
+        $order->update([
+            'status' => 'delivered',
+            'delivered_at' => now()
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Livraison confirmée',
+            'data' => $order
+        ]);
+    }
+
+    // Suivre une commande
     public function track(Request $request, $orderNumber)
     {
         $order = Order::with('items.product')
-            ->where('user_id', $request->user()->id)
+            ->where('user_id', $request->user()->_id)
             ->where('order_number', $orderNumber)
             ->first();
 
@@ -333,36 +459,35 @@ class OrderController extends Controller
         ]);
     }
 
-    /**
-     * Confirmer la réception d'une commande
-     */
-    public function confirmDelivery(Request $request, $id)
+    // MÉTHODES PRIVÉES HELPER
+
+    // Convertir Decimal128 ou autres types en float
+    private function toFloat($value): float
     {
-        $order = Order::where('user_id', $request->user()->id)->find($id);
-
-        if (!$order) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Commande non trouvée'
-            ], 404);
+        if ($value instanceof \MongoDB\BSON\Decimal128) {
+            return (float) $value->__toString();
         }
+        
+        return (float) $value;
+    }
 
-        if ($order->status !== 'shipped') {
-            return response()->json([
-                'success' => false,
-                'message' => 'La commande n\'a pas encore été expédiée'
-            ], 422);
-        }
+    // Calculer la date de livraison estimée
+    private function calculateEstimatedDelivery(string $city): string
+    {
+        $deliveryDays = [
+            'Libreville' => 2,
+            'Port-Gentil' => 4,
+            'Franceville' => 5,
+            'Oyem' => 5,
+            'Moanda' => 5,
+            'Mouila' => 4,
+            'Lambaréné' => 3,
+            'Tchibanga' => 5,
+            'Koulamoutou' => 5,
+            'Makokou' => 6
+        ];
 
-        $order->update([
-            'status' => 'delivered',
-            'delivered_at' => now()
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Livraison confirmée. Merci pour votre commande !',
-            'data' => $order
-        ]);
+        $days = $deliveryDays[$city] ?? 5;
+        return now()->addDays($days)->format('d/m/Y');
     }
 }

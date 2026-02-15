@@ -10,11 +10,13 @@ return new class extends Migration {
             $collection->string('name');
             $collection->mediumText('description')->nullable();
             $collection->double('price');
+            $collection->string('status')->default('active'); // admin
             $collection->integer('stock')->default(0);
             $collection->string('category_id');
             $collection->string('user_id'); // producteur
             $collection->string('image')->nullable();
-            $collection->boolean('is_active')->default(true);
+            $collection->boolean('available_for_delivery')->default(true);
+            $collection->boolean('available_for_pickup')->default(true);
             $collection->timestamps();
         });
     }

@@ -1,4 +1,3 @@
-
 <?php
 
 use Illuminate\Database\Migrations\Migration;
@@ -19,7 +18,7 @@ return new class extends Migration {
 
     public function down(): void
     {
-        Schema::connection('mongodb')->dropIfExists('cache');
+        Schema::connection('mongodb')->dropIfExists('personal_access_tokens');
     }
 };
 

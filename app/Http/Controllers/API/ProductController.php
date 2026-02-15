@@ -13,90 +13,77 @@ use Illuminate\Support\Str;
 class ProductController extends Controller
 {
     /**
-     * Afficher la liste des produits avec filtres
-     * Adapté pour Agrolink Gabon
+     * Liste des produits (public)
      */
     public function index(Request $request)
     {
         $query = Product::with(['category', 'producer'])
             ->where('status', 'active');
 
-        // Recherche par mot-clé
-        if ($request->has('search')) {
+        if ($request->filled('search')) {
             $search = $request->search;
-            $query->where(function($q) use ($search) {
+            $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
                   ->orWhere('description', 'like', "%{$search}%")
                   ->orWhere('local_name', 'like', "%{$search}%");
             });
         }
 
-        // Filtrer par catégorie
-        if ($request->has('category_id')) {
+        if ($request->filled('category_id')) {
             $query->where('category_id', $request->category_id);
         }
 
-        // Filtrer par région de production
-        if ($request->has('region')) {
+        if ($request->filled('region')) {
             $query->where('region', $request->region);
         }
 
-        // Filtrer par ville
-        if ($request->has('city')) {
+        if ($request->filled('city')) {
             $query->where('city', $request->city);
         }
 
-        // Filtrer par type (bio, local, importé)
-        if ($request->has('type')) {
+        if ($request->filled('type')) {
             $query->where('type', $request->type);
         }
 
-        // Filtrer par disponibilité
-        if ($request->has('in_stock') && $request->in_stock) {
+        if ($request->boolean('in_stock')) {
             $query->where('stock', '>', 0);
         }
 
-        // Filtrer par prix
-        if ($request->has('min_price')) {
+        if ($request->filled('min_price')) {
             $query->where('price', '>=', $request->min_price);
         }
-        if ($request->has('max_price')) {
+
+        if ($request->filled('max_price')) {
             $query->where('price', '<=', $request->max_price);
         }
 
-        // Filtrer par producteur
-        if ($request->has('producer_id')) {
+        if ($request->filled('producer_id')) {
             $query->where('producer_id', $request->producer_id);
         }
 
-        // Produits en promotion
-        if ($request->has('on_sale') && $request->on_sale) {
+        if ($request->boolean('on_sale')) {
             $query->whereNotNull('discount_price');
         }
 
         // Tri
-        $sortBy = $request->get('sort_by', 'created_at');
-        $sortOrder = $request->get('sort_order', 'desc');
-        
-        switch ($sortBy) {
-            case 'price_asc':
-                $query->orderBy('price', 'asc');
-                break;
-            case 'price_desc':
-                $query->orderBy('price', 'desc');
-                break;
-            case 'name':
-                $query->orderBy('name', 'asc');
-                break;
-            case 'popularity':
-                $query->orderBy('views', 'desc');
-                break;
-            default:
-                $query->orderBy($sortBy, $sortOrder);
-        }
+        match ($request->get('sort_by')) {
+            'price_asc'  => $query->orderBy('price', 'asc'),
+            'price_desc' => $query->orderBy('price', 'desc'),
+            'name'       => $query->orderBy('name', 'asc'),
+            'popularity' => $query->orderBy('views', 'desc'),
+            default      => $query->orderBy(
+                $request->get('sort_by', 'created_at'),
+                $request->get('sort_order', 'desc')
+            ),
+        };
 
-        $perPage = $request->get('per_page', 15);
-        $products = $query->paginate($perPage);
+        $products = $query->paginate($request->get('per_page', 15));
+
+        // Ajouter disponibilité calculée
+        $products->getCollection()->transform(function ($product) {
+            $product->is_available = $product->status === 'active' && $product->stock > 0;
+            return $product;
+        });
 
         return response()->json([
             'success' => true,
@@ -107,94 +94,77 @@ class ProductController extends Controller
     }
 
     /**
-     * Créer un nouveau produit (pour les producteurs)
+     * Création produit (producteur)
      */
     public function store(Request $request)
     {
+        if (!$request->user()->isProducer()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Accès réservé aux producteurs'
+            ], 403);
+        }
+
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
             'local_name' => 'nullable|string|max:255',
             'description' => 'required|string',
-            'category_id' => 'required|exists:categories,id',
+            'category_id' => 'required|exists:categories,_id',
             'price' => 'required|numeric|min:0',
             'discount_price' => 'nullable|numeric|min:0|lt:price',
             'unit' => 'required|in:kg,g,l,ml,piece,bunch,bag,box',
             'stock' => 'required|integer|min:0',
             'min_order_quantity' => 'nullable|integer|min:1',
             'region' => 'required|string',
-            'city' => 'required|string|in:Libreville,Port-Gentil,Franceville,Oyem,Moanda,Mouila,Lambaréné,Tchibanga,Koulamoutou,Makokou',
+            'city' => 'required|string',
             'type' => 'required|in:bio,local,conventionnel',
             'images.*' => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
             'harvest_date' => 'nullable|date',
             'expiry_date' => 'nullable|date|after:harvest_date',
             'shipping_cost' => 'nullable|numeric|min:0',
             'available_for_delivery' => 'boolean',
-            'available_for_pickup' => 'boolean'
-        ], [
-            'name.required' => 'Le nom du produit est obligatoire',
-            'description.required' => 'La description est obligatoire',
-            'category_id.required' => 'La catégorie est obligatoire',
-            'category_id.exists' => 'Cette catégorie n\'existe pas',
-            'price.required' => 'Le prix est obligatoire',
-            'price.min' => 'Le prix doit être positif',
-            'discount_price.lt' => 'Le prix promotionnel doit être inférieur au prix normal',
-            'unit.required' => 'L\'unité de mesure est obligatoire',
-            'stock.required' => 'La quantité en stock est obligatoire',
-            'region.required' => 'La région de production est obligatoire',
-            'city.required' => 'La ville est obligatoire',
-            'type.required' => 'Le type de produit est obligatoire'
+            'available_for_pickup' => 'boolean',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Erreur de validation',
                 'errors' => $validator->errors()
             ], 422);
         }
 
-        try {
-            $productData = $request->except('images');
-            $productData['producer_id'] = $request->user()->id;
-            $productData['slug'] = Str::slug($request->name);
-            $productData['status'] = 'active';
+        $data = $request->except('images');
+        $data['producer_id'] = $request->user()->id;
+        $data['slug'] = Str::slug($request->name);
+        $data['status'] = 'active';
 
-            $product = Product::create($productData);
+        $product = Product::create($data);
 
-            // Gestion des images
-            if ($request->hasFile('images')) {
-                $images = [];
-                foreach ($request->file('images') as $image) {
-                    $path = $image->store('products', 'public');
-                    $images[] = $path;
-                }
-                $product->images = json_encode($images);
-                $product->save();
+        if ($request->hasFile('images')) {
+            $paths = [];
+            foreach ($request->file('images') as $image) {
+                $paths[] = $image->store('products', 'public');
             }
-
-            $product->load('category', 'producer');
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Produit créé avec succès',
-                'data' => $product
-            ], 201);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreur lors de la création du produit',
-                'error' => $e->getMessage()
-            ], 500);
+            $product->images = $paths;
+            $product->save();
         }
+
+        $product->load('category', 'producer');
+        $product->is_available = $product->stock > 0;
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Produit créé avec succès',
+            'data' => $product
+        ], 201);
     }
 
     /**
-     * Afficher les détails d'un produit
+     * Détails produit
      */
     public function show($id)
     {
-        $product = Product::with(['category', 'producer', 'reviews.user'])
+        $product = Product::with(['category', 'producer'])
             ->where('status', 'active')
             ->find($id);
 
@@ -205,29 +175,18 @@ class ProductController extends Controller
             ], 404);
         }
 
-        // Incrémenter le compteur de vues
         $product->increment('views');
-
-        // Produits similaires
-        $similarProducts = Product::where('category_id', $product->category_id)
-            ->where('id', '!=', $product->id)
-            ->where('status', 'active')
-            ->limit(4)
-            ->get();
+        $product->is_available = $product->stock > 0;
 
         return response()->json([
             'success' => true,
-            'message' => 'Détails du produit',
-            'data' => [
-                'product' => $product,
-                'similar_products' => $similarProducts
-            ],
+            'data' => $product,
             'currency' => 'FCFA'
         ]);
     }
 
     /**
-     * Mettre à jour un produit
+     * Mise à jour produit (producteur)
      */
     public function update(Request $request, $id)
     {
@@ -240,69 +199,34 @@ class ProductController extends Controller
             ], 404);
         }
 
-        $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|required|string|max:255',
-            'local_name' => 'nullable|string|max:255',
-            'description' => 'sometimes|required|string',
-            'category_id' => 'sometimes|required|exists:categories,id',
-            'price' => 'sometimes|required|numeric|min:0',
-            'discount_price' => 'nullable|numeric|min:0',
-            'unit' => 'sometimes|required|in:kg,g,l,ml,piece,bunch,bag,box',
-            'stock' => 'sometimes|required|integer|min:0',
-            'status' => 'sometimes|in:active,inactive,out_of_stock',
-            'images.*' => 'nullable|image|mimes:jpeg,png,jpg|max:2048'
-        ]);
+        $product->update($request->except('images'));
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreur de validation',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        try {
-            $product->update($request->except('images'));
-
-            // Gestion des nouvelles images
-            if ($request->hasFile('images')) {
-                // Supprimer les anciennes images
-                if ($product->images) {
-                    $oldImages = json_decode($product->images, true);
-                    foreach ($oldImages as $oldImage) {
-                        Storage::disk('public')->delete($oldImage);
-                    }
+        if ($request->hasFile('images')) {
+            if (is_array($product->images)) {
+                foreach ($product->images as $img) {
+                    Storage::disk('public')->delete($img);
                 }
-
-                // Ajouter les nouvelles images
-                $images = [];
-                foreach ($request->file('images') as $image) {
-                    $path = $image->store('products', 'public');
-                    $images[] = $path;
-                }
-                $product->images = json_encode($images);
-                $product->save();
             }
 
-            $product->load('category', 'producer');
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Produit mis à jour avec succès',
-                'data' => $product
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreur lors de la mise à jour',
-                'error' => $e->getMessage()
-            ], 500);
+            $paths = [];
+            foreach ($request->file('images') as $image) {
+                $paths[] = $image->store('products', 'public');
+            }
+            $product->images = $paths;
+            $product->save();
         }
+
+        $product->is_available = $product->stock > 0;
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Produit mis à jour',
+            'data' => $product
+        ]);
     }
 
     /**
-     * Supprimer un produit
+     * Suppression produit
      */
     public function destroy(Request $request, $id)
     {
@@ -315,98 +239,49 @@ class ProductController extends Controller
             ], 404);
         }
 
-        try {
-            // Supprimer les images
-            if ($product->images) {
-                $images = json_decode($product->images, true);
-                foreach ($images as $image) {
-                    Storage::disk('public')->delete($image);
-                }
+        if (is_array($product->images)) {
+            foreach ($product->images as $img) {
+                Storage::disk('public')->delete($img);
             }
-
-            $product->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Produit supprimé avec succès'
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreur lors de la suppression',
-                'error' => $e->getMessage()
-            ], 500);
         }
+
+        $product->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Produit supprimé'
+        ]);
     }
-
-    /**
-     * Produits par catégorie
-     */
-    public function byCategory($categoryId)
+// Admin - Mise à jour du statut du produit
+    public function updateStatus(Request $request, $id)
     {
-        $category = Category::find($categoryId);
+        $product = Product::find($id);
 
-        if (!$category) {
+        if (!$product) {
             return response()->json([
                 'success' => false,
-                'message' => 'Catégorie non trouvée'
+                'message' => 'Produit non trouvé'
             ], 404);
         }
 
-        $products = Product::with('producer')
-            ->where('category_id', $categoryId)
-            ->where('status', 'active')
-            ->paginate(15);
-
-        return response()->json([
-            'success' => true,
-            'message' => "Produits de la catégorie: {$category->name}",
-            'data' => [
-                'category' => $category,
-                'products' => $products
-            ],
-            'currency' => 'FCFA'
+        $validator = Validator::make($request->all(), [
+            'status' => 'required|in:active,inactive,out_of_stock'
         ]);
-    }
 
-    /**
-     * Produits en vedette/populaires
-     */
-    public function featured()
-    {
-        $products = Product::with(['category', 'producer'])
-            ->where('status', 'active')
-            ->where('is_featured', true)
-            ->orWhere('views', '>', 100)
-            ->orderBy('views', 'desc')
-            ->limit(10)
-            ->get();
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $product->status = $request->status;
+        $product->save();
 
         return response()->json([
             'success' => true,
-            'message' => 'Produits en vedette',
-            'data' => $products,
-            'currency' => 'FCFA'
-        ]);
-    }
-
-    /**
-     * Produits du jour/frais
-     */
-    public function fresh()
-    {
-        $products = Product::with(['category', 'producer'])
-            ->where('status', 'active')
-            ->whereDate('harvest_date', '>=', now()->subDays(3))
-            ->orderBy('harvest_date', 'desc')
-            ->paginate(15);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Produits frais du jour',
-            'data' => $products,
-            'currency' => 'FCFA'
+            'message' => 'Statut du produit mis à jour',
+            'data' => $product
         ]);
     }
 }

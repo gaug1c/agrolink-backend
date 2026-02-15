@@ -2,13 +2,15 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
+use MongoDB\Laravel\Eloquent\Model;
+use MongoDB\Laravel\Eloquent\SoftDeletes;
 
 class Product extends Model
 {
-    use HasFactory, SoftDeletes;
+    use SoftDeletes;
+
+    protected $connection = 'mongodb';
+    protected $collection = 'products';
 
     protected $fillable = [
         'producer_id',
@@ -35,7 +37,7 @@ class Product extends Model
         'is_featured',
         'views',
         'rating',
-        'reviews_count'
+        'reviews_count',
     ];
 
     protected $casts = [
@@ -43,98 +45,31 @@ class Product extends Model
         'discount_price' => 'decimal:2',
         'shipping_cost' => 'decimal:2',
         'stock' => 'integer',
-        'min_order_quantity' => 'integer',
         'views' => 'integer',
-        'reviews_count' => 'integer',
         'rating' => 'decimal:1',
         'available_for_delivery' => 'boolean',
         'available_for_pickup' => 'boolean',
         'is_featured' => 'boolean',
-        'harvest_date' => 'date',
-        'expiry_date' => 'date',
-        'images' => 'array'
+        'images' => 'array',
+        'harvest_date' => 'datetime',
+        'expiry_date' => 'datetime',
     ];
 
-    protected $appends = [
-        'final_price',
-        'discount_percentage',
-        'is_in_stock',
-        'is_fresh'
-    ];
-
-    /**
-     * Relations
-     */
-    public function producer()
-    {
-        return $this->belongsTo(User::class, 'producer_id');
-    }
+    /* Relations */
 
     public function category()
     {
-        return $this->belongsTo(Category::class);
+        return $this->belongsTo(Category::class, 'category_id', '_id');
     }
 
-    public function orderItems()
+    public function producer()
     {
-        return $this->hasMany(OrderItem::class);
+        return $this->belongsTo(User::class, 'producer_id', '_id')
+                    ->where('role', 'producer');
     }
 
-    public function cartItems()
-    {
-        return $this->hasMany(CartItem::class);
-    }
+    /* Scopes */
 
-    public function reviews()
-    {
-        return $this->hasMany(Review::class);
-    }
-
-    public function favorites()
-    {
-        return $this->hasMany(Favorite::class);
-    }
-
-    /**
-     * Accesseurs
-     */
-    public function getFinalPriceAttribute()
-    {
-        return $this->discount_price ?? $this->price;
-    }
-
-    public function getDiscountPercentageAttribute()
-    {
-        if ($this->discount_price && $this->price > 0) {
-            return round((($this->price - $this->discount_price) / $this->price) * 100);
-        }
-        return 0;
-    }
-
-    public function getIsInStockAttribute()
-    {
-        return $this->stock > 0;
-    }
-
-    public function getIsFreshAttribute()
-    {
-        if (!$this->harvest_date) {
-            return false;
-        }
-        return $this->harvest_date->diffInDays(now()) <= 3;
-    }
-
-    public function getFirstImageAttribute()
-    {
-        if (!empty($this->images) && is_array($this->images)) {
-            return asset('storage/' . $this->images[0]);
-        }
-        return asset('images/default-product.png');
-    }
-
-    /**
-     * Scopes
-     */
     public function scopeActive($query)
     {
         return $query->where('status', 'active');
@@ -145,48 +80,15 @@ class Product extends Model
         return $query->where('stock', '>', 0);
     }
 
-    public function scopeFeatured($query)
-    {
-        return $query->where('is_featured', true);
-    }
-
-    public function scopeByRegion($query, $region)
-    {
-        return $query->where('region', $region);
-    }
-
-    public function scopeByCity($query, $city)
-    {
-        return $query->where('city', $city);
-    }
-
     public function scopeOnSale($query)
     {
         return $query->whereNotNull('discount_price');
     }
 
-    public function scopeFresh($query)
-    {
-        return $query->whereDate('harvest_date', '>=', now()->subDays(3));
-    }
+    /* Accessors */
 
-    /**
-     * Méthodes utilitaires
-     */
-    public function updateRating()
-    {
-        $this->rating = $this->reviews()->avg('rating');
-        $this->reviews_count = $this->reviews()->count();
-        $this->save();
-    }
-
-    public function isAvailable()
+    public function getIsAvailableAttribute()
     {
         return $this->status === 'active' && $this->stock > 0;
-    }
-
-    public function canOrder($quantity)
-    {
-        return $this->stock >= $quantity && $quantity >= ($this->min_order_quantity ?? 1);
     }
 }

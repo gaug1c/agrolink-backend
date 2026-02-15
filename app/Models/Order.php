@@ -2,13 +2,15 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
+use MongoDB\Laravel\Eloquent\Model;
+use MongoDB\Laravel\Eloquent\SoftDeletes;
 
 class Order extends Model
 {
-    use HasFactory, SoftDeletes;
+    use SoftDeletes;
+
+    protected $connection = 'mongodb';
+    protected $collection = 'orders';
 
     protected $fillable = [
         'user_id',
@@ -33,20 +35,34 @@ class Order extends Model
         'shipped_at',
         'delivered_at',
         'cancelled_at',
-        'cancellation_reason'
+        'cancellation_reason',
+        'ip_address',
+        'user_agent',
+        'converted_to_order_id',
+        'converted_at'
     ];
 
+    // ❌ SUPPRIMEZ CES CASTS DECIMAL QUI CAUSENT L'ERREUR
+    // protected $casts = [
+    //     'subtotal' => 'decimal:2',
+    //     'shipping_cost' => 'decimal:2',
+    //     'tax' => 'decimal:2',
+    //     'total_amount' => 'decimal:2',
+    // ];
+
+    // ✅ UTILISEZ FLOAT À LA PLACE
     protected $casts = [
-        'subtotal' => 'decimal:2',
-        'shipping_cost' => 'decimal:2',
-        'tax' => 'decimal:2',
-        'total_amount' => 'decimal:2',
+        'subtotal' => 'float',
+        'shipping_cost' => 'float',
+        'tax' => 'float',
+        'total_amount' => 'float',
         'confirmed_at' => 'datetime',
         'processing_at' => 'datetime',
         'shipped_at' => 'datetime',
         'delivered_at' => 'datetime',
         'cancelled_at' => 'datetime',
-        'estimated_delivery_date' => 'date'
+        'estimated_delivery_date' => 'datetime',
+        'converted_at' => 'datetime',
     ];
 
     protected $appends = [
@@ -55,9 +71,39 @@ class Order extends Model
         'can_be_cancelled'
     ];
 
-    /**
-     * Status constants
-     */
+    // ✅ AJOUTEZ CES ACCESSEURS POUR GÉRER DECIMAL128
+    public function getSubtotalAttribute($value)
+    {
+        return $this->convertToFloat($value);
+    }
+
+    public function getShippingCostAttribute($value)
+    {
+        return $this->convertToFloat($value);
+    }
+
+    public function getTaxAttribute($value)
+    {
+        return $this->convertToFloat($value);
+    }
+
+    public function getTotalAmountAttribute($value)
+    {
+        return $this->convertToFloat($value);
+    }
+
+    // Helper pour convertir Decimal128
+    private function convertToFloat($value)
+    {
+        if ($value instanceof \MongoDB\BSON\Decimal128) {
+            return (float) $value->__toString();
+        }
+        
+        return $value ? (float) $value : 0;
+    }
+
+    // ... reste du code inchangé
+    
     const STATUS_PENDING = 'pending';
     const STATUS_CONFIRMED = 'confirmed';
     const STATUS_PROCESSING = 'processing';
@@ -70,32 +116,26 @@ class Order extends Model
     const PAYMENT_FAILED = 'failed';
     const PAYMENT_REFUNDED = 'refunded';
 
-    /**
-     * Relations
-     */
     public function user()
     {
-        return $this->belongsTo(User::class);
+        return $this->belongsTo(User::class, 'user_id', '_id');
     }
 
     public function items()
     {
-        return $this->hasMany(OrderItem::class);
+        return $this->hasMany(OrderItem::class, 'order_id', '_id');
     }
 
     public function payment()
     {
-        return $this->hasOne(Payment::class);
+        return $this->hasOne(Payment::class, 'order_id', '_id');
     }
 
     public function statusHistories()
     {
-        return $this->hasMany(OrderStatusHistory::class);
+        return $this->hasMany(OrderStatusHistory::class, 'order_id', '_id');
     }
 
-    /**
-     * Accesseurs
-     */
     public function getStatusLabelAttribute()
     {
         $labels = [
@@ -124,12 +164,13 @@ class Order extends Model
 
     public function getCanBeCancelledAttribute()
     {
-        return in_array($this->status, ['pending', 'confirmed', 'processing']);
+        return in_array($this->status, [
+            self::STATUS_PENDING, 
+            self::STATUS_CONFIRMED, 
+            self::STATUS_PROCESSING
+        ]);
     }
 
-    /**
-     * Scopes
-     */
     public function scopePending($query)
     {
         return $query->where('status', self::STATUS_PENDING);
@@ -170,15 +211,11 @@ class Order extends Model
         return $query->orderBy('created_at', 'desc');
     }
 
-    /**
-     * Méthodes utilitaires
-     */
     public function updateStatus($newStatus, $reason = null)
     {
         $oldStatus = $this->status;
         $this->status = $newStatus;
 
-        // Mettre à jour les timestamps correspondants
         switch ($newStatus) {
             case self::STATUS_CONFIRMED:
                 $this->confirmed_at = now();
@@ -194,15 +231,12 @@ class Order extends Model
                 break;
             case self::STATUS_CANCELLED:
                 $this->cancelled_at = now();
-                if ($reason) {
-                    $this->cancellation_reason = $reason;
-                }
+                $this->cancellation_reason = $reason;
                 break;
         }
 
         $this->save();
 
-        // Enregistrer l'historique
         $this->statusHistories()->create([
             'old_status' => $oldStatus,
             'new_status' => $newStatus,
@@ -233,6 +267,6 @@ class Order extends Model
     {
         return $this->items->map(function($item) {
             return $item->product->producer;
-        })->unique('id');
+        })->unique('_id');
     }
 }

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
 use App\Models\Category;
+use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
@@ -20,27 +21,30 @@ class CategoryController extends Controller
 
         // Filtrer uniquement les catégories actives
         if ($request->has('active') && $request->active) {
-            $query->active();
+            $query->where('is_active', true);
         }
 
         // Afficher uniquement les catégories parentes
         if ($request->has('parents_only') && $request->parents_only) {
-            $query->parents();
+            $query->whereNull('parent_id');
         }
 
         // Inclure les sous-catégories
         if ($request->has('with_children') && $request->with_children) {
-            $query->with('children');
+            $categories = $query->orderBy('name')->get();
+            $categories->each(function($category) {
+                $category->children = Category::where('parent_id', $category->_id)->get();
+            });
+        } else {
+            $categories = $query->orderBy('name')->get();
         }
 
         // Inclure le nombre de produits
         if ($request->has('with_products_count') && $request->with_products_count) {
-            $query->withCount(['products' => function($q) {
-                $q->where('status', 'active');
-            }]);
+            $categories->each(function($category) {
+                $category->products_count = $category->products()->where('status', 'active')->count();
+            });
         }
-
-        $categories = $query->orderBy('name')->get();
 
         return response()->json([
             'success' => true,
@@ -54,18 +58,22 @@ class CategoryController extends Controller
      */
     public function tree()
     {
-        $categories = Category::with(['children' => function($query) {
-            $query->active()->withCount(['products' => function($q) {
-                $q->where('status', 'active');
-            }]);
-        }])
-        ->active()
-        ->parents()
-        ->withCount(['products' => function($q) {
-            $q->where('status', 'active');
-        }])
-        ->orderBy('name')
-        ->get();
+        $categories = Category::where('is_active', true)
+            ->whereNull('parent_id')
+            ->orderBy('name')
+            ->get();
+
+        $categories->each(function($category) {
+            $category->children = Category::where('parent_id', $category->_id)
+                ->where('is_active', true)
+                ->get();
+            
+            $category->products_count = $category->products()->where('status', 'active')->count();
+            
+            $category->children->each(function($child) {
+                $child->products_count = $child->products()->where('status', 'active')->count();
+            });
+        });
 
         return response()->json([
             'success' => true,
@@ -80,40 +88,50 @@ class CategoryController extends Controller
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255|unique:categories',
+            'name' => 'required|string|max:255',
             'description' => 'nullable|string',
-            'parent_id' => 'nullable|exists:categories,id',
-            'image' => 'nullable|image|mimes:jpeg,png,jpg,svg|max:2048',
+            'parent_id' => 'nullable|string',
             'icon' => 'nullable|string|max:255',
             'is_active' => 'boolean'
         ], [
-            'name.required' => 'Le nom de la catégorie est obligatoire',
-            'name.unique' => 'Cette catégorie existe déjà',
-            'parent_id.exists' => 'La catégorie parente n\'existe pas',
-            'image.image' => 'Le fichier doit être une image',
-            'image.mimes' => 'Format d\'image accepté: jpeg, png, jpg, svg',
-            'image.max' => 'L\'image ne doit pas dépasser 2Mo'
+            'name.required' => 'Le nom de la catégorie est obligatoire'
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Erreur de validation',
                 'errors' => $validator->errors()
             ], 422);
         }
 
         try {
-            $categoryData = $request->except('image');
-            $categoryData['slug'] = Str::slug($request->name);
-
-            // Gérer l'image
-            if ($request->hasFile('image')) {
-                $path = $request->file('image')->store('categories', 'public');
-                $categoryData['image'] = $path;
+            // Vérification unicité du nom
+            if (Category::where('name', $request->name)->exists()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cette catégorie existe déjà'
+                ], 422);
             }
 
-            $category = Category::create($categoryData);
+            // Vérification que le parent_id existe si fourni
+            if ($request->parent_id) {
+                $parent = Category::find($request->parent_id);
+                if (!$parent) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Catégorie parente non trouvée'
+                    ], 404);
+                }
+            }
+
+            $category = Category::create([
+                'name' => $request->name,
+                'slug' => Str::slug($request->name),
+                'description' => $request->description,
+                'parent_id' => $request->parent_id,
+                'icon' => $request->icon,
+                'is_active' => $request->is_active ?? true
+            ]);
 
             return response()->json([
                 'success' => true,
@@ -124,7 +142,7 @@ class CategoryController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Erreur lors de la création de la catégorie',
+                'message' => 'Erreur serveur',
                 'error' => $e->getMessage()
             ], 500);
         }
@@ -135,11 +153,7 @@ class CategoryController extends Controller
      */
     public function show($id)
     {
-        $category = Category::with(['children', 'parent'])
-            ->withCount(['products' => function($q) {
-                $q->where('status', 'active');
-            }])
-            ->find($id);
+        $category = Category::find($id);
 
         if (!$category) {
             return response()->json([
@@ -148,11 +162,20 @@ class CategoryController extends Controller
             ], 404);
         }
 
+        // Charger les sous-catégories
+        $category->children = Category::where('parent_id', $category->_id)->get();
+        
+        // Charger la catégorie parente si elle existe
+        if ($category->parent_id) {
+            $category->parent = Category::find($category->parent_id);
+        }
+
+        // Nombre de produits
+        $category->products_count = $category->products()->where('status', 'active')->count();
+
         // Récupérer quelques produits de cette catégorie
         $products = $category->products()
-            ->with('producer')
             ->where('status', 'active')
-            ->inStock()
             ->limit(10)
             ->get();
 
@@ -181,10 +204,9 @@ class CategoryController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|required|string|max:255|unique:categories,name,' . $id,
+            'name' => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
-            'parent_id' => 'nullable|exists:categories,id',
-            'image' => 'nullable|image|mimes:jpeg,png,jpg,svg|max:2048',
+            'parent_id' => 'nullable|string',
             'icon' => 'nullable|string|max:255',
             'is_active' => 'boolean'
         ]);
@@ -198,20 +220,39 @@ class CategoryController extends Controller
         }
 
         try {
-            $categoryData = $request->except('image');
+            // Vérifier l'unicité du nom si modifié
+            if ($request->has('name') && $request->name !== $category->name) {
+                if (Category::where('name', $request->name)->where('_id', '!=', $id)->exists()) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Ce nom de catégorie existe déjà'
+                    ], 422);
+                }
+            }
+
+            // Vérifier que le parent_id existe si fourni
+            if ($request->has('parent_id') && $request->parent_id) {
+                // Empêcher qu'une catégorie soit son propre parent
+                if ($request->parent_id === $id) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Une catégorie ne peut pas être son propre parent'
+                    ], 422);
+                }
+
+                $parent = Category::find($request->parent_id);
+                if (!$parent) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Catégorie parente non trouvée'
+                    ], 404);
+                }
+            }
+
+            $categoryData = $request->only(['name', 'description', 'parent_id', 'icon', 'is_active']);
 
             if ($request->has('name')) {
                 $categoryData['slug'] = Str::slug($request->name);
-            }
-
-            // Gérer la nouvelle image
-            if ($request->hasFile('image')) {
-                // Supprimer l'ancienne image
-                if ($category->image) {
-                    Storage::disk('public')->delete($category->image);
-                }
-                $path = $request->file('image')->store('categories', 'public');
-                $categoryData['image'] = $path;
             }
 
             $category->update($categoryData);
@@ -219,7 +260,7 @@ class CategoryController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Catégorie mise à jour avec succès',
-                'data' => $category
+                'data' => $category->fresh()
             ]);
 
         } catch (\Exception $e) {
@@ -231,76 +272,58 @@ class CategoryController extends Controller
         }
     }
 
-    /**
-     * Supprimer une catégorie (Admin)
-     */
-    public function destroy($id)
-    {
-        $category = Category::find($id);
+    public function destroy(string $id)
+{
+    $category = Category::find($id);
 
-        if (!$category) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Catégorie non trouvée'
-            ], 404);
-        }
-
-        // Vérifier si la catégorie a des produits
-        if ($category->products()->exists()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Impossible de supprimer cette catégorie car elle contient des produits'
-            ], 422);
-        }
-
-        // Vérifier si la catégorie a des sous-catégories
-        if ($category->children()->exists()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Impossible de supprimer cette catégorie car elle a des sous-catégories'
-            ], 422);
-        }
-
-        try {
-            // Supprimer l'image
-            if ($category->image) {
-                Storage::disk('public')->delete($category->image);
-            }
-
-            $category->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Catégorie supprimée avec succès'
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreur lors de la suppression',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+    if (!$category) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Catégorie non trouvée'
+        ], 404);
     }
+
+    // 🔥 MongoDB SAFE
+    if (Product::where('category_id', $category->_id)->exists()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Impossible de supprimer cette catégorie car elle contient des produits'
+        ], 422);
+    }
+
+    if (Category::where('parent_id', $category->_id)->exists()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Impossible de supprimer cette catégorie car elle a des sous-catégories'
+        ], 422);
+    }
+
+    $category->delete();
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Catégorie supprimée avec succès'
+    ]);
+}
 
     /**
      * Catégories populaires (les plus utilisées)
      */
     public function popular()
     {
-        $categories = Category::active()
-            ->withCount(['products' => function($q) {
-                $q->where('status', 'active');
-            }])
-            ->having('products_count', '>', 0)
-            ->orderBy('products_count', 'desc')
-            ->limit(10)
-            ->get();
+        $categories = Category::where('is_active', true)->get();
+
+        $categoriesWithCount = $categories->map(function($category) {
+            $category->products_count = $category->products()->where('status', 'active')->count();
+            return $category;
+        })->filter(function($category) {
+            return $category->products_count > 0;
+        })->sortByDesc('products_count')->take(10)->values();
 
         return response()->json([
             'success' => true,
             'message' => 'Catégories populaires',
-            'data' => $categories
+            'data' => $categoriesWithCount
         ]);
     }
 
@@ -321,14 +344,19 @@ class CategoryController extends Controller
             ], 422);
         }
 
-        $categories = Category::active()
-            ->where('name', 'like', "%{$request->q}%")
-            ->orWhere('description', 'like', "%{$request->q}%")
-            ->withCount(['products' => function($q) {
-                $q->where('status', 'active');
-            }])
+        $searchTerm = $request->q;
+
+        $categories = Category::where('is_active', true)
+            ->where(function($query) use ($searchTerm) {
+                $query->where('name', 'like', "%{$searchTerm}%")
+                      ->orWhere('description', 'like', "%{$searchTerm}%");
+            })
             ->limit(20)
             ->get();
+
+        $categories->each(function($category) {
+            $category->products_count = $category->products()->where('status', 'active')->count();
+        });
 
         return response()->json([
             'success' => true,

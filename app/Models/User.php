@@ -2,26 +2,20 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Notifications\Notifiable;
-use Laravel\Sanctum\HasApiTokens;
+use MongoDB\Laravel\Auth\User as MongoAuthenticatable;
 use Tymon\JWTAuth\Contracts\JWTSubject;
-use MongoDB\Laravel\Eloquent\Model as Eloquent;
-use Illuminate\Auth\Authenticatable as BaseAuthenticatable;
-use Illuminate\Contracts\Auth\Authenticatable as AuthenticatableContract;
+use App\Notifications\ResetPasswordNotification;
 
-class User extends Eloquent implements JWTSubject, AuthenticatableContract
+class User extends MongoAuthenticatable implements JWTSubject
 {
-    use HasApiTokens, Notifiable, BaseAuthenticatable;
+    use HasFactory, Notifiable;
 
     protected $connection = 'mongodb';
     protected $collection = 'users';
 
-    /**
-     * Champs autorisés à l’écriture
-     */
     protected $fillable = [
-
-        // Identité
         'first_name',
         'last_name',
         'email',
@@ -29,125 +23,82 @@ class User extends Eloquent implements JWTSubject, AuthenticatableContract
         'phone',
         'avatar',
 
-        // Rôle & statut
-        'role',           // consumer | producer | admin
-        'status',         // active | suspended
+        'role',
+        'status',
         'is_verified',
 
-        // Localisation
         'address',
         'city',
         'postal_code',
         'country',
         'region',
 
-        // Producteur
         'business_name',
         'province',
         'production_city',
         'production_village',
-        'production_types',      // array/json
-        'identity_document',     // file path
-        'mobile_money_number',
-        'bank_account',
-        'tax_id',
+        'production_types',
+        'other_production',
+        'cultivated_area',
+        'area_unit',
+        'available_quantity',
+        'is_whatsapp',
+        'delivery_available',
+        'identity_document',
 
-        // Métadonnées
         'email_verified_at',
         'phone_verified_at',
         'last_login_at',
     ];
 
-    /**
-     * Champs cachés
-     */
     protected $hidden = [
         'password',
-        'remember_token',
     ];
 
-    /**
-     * Casts
-     */
     protected $casts = [
         'email_verified_at' => 'datetime',
         'phone_verified_at' => 'datetime',
-        'last_login_at' => 'datetime',
-        'is_verified' => 'boolean',
-        'production_types' => 'array',
+        'last_login_at'     => 'datetime',
+        'is_verified'       => 'boolean',
+        'is_whatsapp'       => 'boolean',
+        'production_types'  => 'array',
     ];
 
-    /* -----------------------------------------------------------------
-     | JWT
-     |-----------------------------------------------------------------*/
+    /**
+     * 🔐 JWT IDENTIFIER
+     */
     public function getJWTIdentifier()
     {
         return $this->getKey();
     }
 
-    public function getJWTCustomClaims()
-    {
-        return [];
-    }
-
-    /* -----------------------------------------------------------------
-     | Accessors
-     |-----------------------------------------------------------------*/
-
     /**
-     * Nom complet (compatibilité)
+     * 🔐 JWT CUSTOM CLAIMS
      */
-    public function getNameAttribute()
+    public function getJWTCustomClaims(): array
     {
-        return trim(($this->first_name ?? '') . ' ' . ($this->last_name ?? ''));
+        return [
+            'role' => $this->role,
+            'email' => $this->email,
+        ];
     }
 
-    /**
-     * Alias explicite
-     */
-    public function getFullNameAttribute()
-    {
-        return $this->name;
-    }
-
-    /* -----------------------------------------------------------------
-     | Helpers rôle
-     |-----------------------------------------------------------------*/
-    public function isProducer()
+    public function isProducer(): bool
     {
         return $this->role === 'producer';
     }
 
-    public function isConsumer()
+    public function isConsumer(): bool
     {
         return $this->role === 'consumer';
     }
 
-    public function isAdmin()
+    public function isAdmin(): bool
     {
         return $this->role === 'admin';
     }
-
-    /* -----------------------------------------------------------------
-     | Relations
-     |-----------------------------------------------------------------*/
-    public function products()
+    public function sendPasswordResetNotification($token)
     {
-        return $this->hasMany(Product::class, 'producer_id');
-    }
-
-    public function orders()
-    {
-        return $this->hasMany(Order::class);
-    }
-
-    public function cart()
-    {
-        return $this->hasOne(Cart::class);
-    }
-
-    public function favorites()
-    {
-        return $this->hasMany(Favorite::class);
+        $this->notify(new ResetPasswordNotification($token));
     }
 }

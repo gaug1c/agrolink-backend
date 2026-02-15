@@ -9,93 +9,123 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Tymon\JWTAuth\Facades\JWTAuth;
 use Tymon\JWTAuth\Exceptions\JWTException;
+use Tymon\JWTAuth\Exceptions\TokenExpiredException;
+use Tymon\JWTAuth\Exceptions\TokenInvalidException;
 
 class AuthController extends Controller
 {
     /**
-     * Inscription d'un utilisateur (consumer ou producer)
+     * REGISTER – Inscription producteur / consommateur
      */
     public function register(Request $request)
     {
-        $userType = $request->input('userType', 'consumer');
+        $validator = Validator::make($request->all(), [
+        // Champs communs
+        'userType'    => 'required|in:producteur,acheteur,consumer,producer',
+        'first_name'  => 'required|string|max:255',
+        'last_name'   => 'required|string|max:255',
+        'email'       => 'required|string|email|max:255',
+        'password'    => 'required|string|min:8|confirmed',
+        'phone'       => 'required|string',
+        'city'        => 'required|string|max:255',
+        'acceptTerms' => 'required|accepted',
 
-        $rules = [
-            'userType' => 'required|in:consumer,producer',
-            'email' => 'required|email|unique:users,email',
-            'password' => 'required|min:6|confirmed',
-            'phone' => 'nullable|string',
-        ];
+        // Producteur
+        'nomStructure'      => 'required_if:userType,producteur,producer|string|max:255',
+        'typesProduction'   => 'required_if:userType,producteur,producer|array',
+        'province'          => 'required_if:userType,producteur,producer|string|max:255',
+        'cityProduction'    => 'required_if:userType,producteur,producer|string|max:255',
+        'villageProduction' => 'nullable|string|max:255',
 
-        if ($userType === 'consumer') {
-            $rules = array_merge($rules, [
-                'first_name' => 'required|string|max:255',
-                'last_name'  => 'required|string|max:255',
-                'city'      => 'required|string|max:255',
-            ]);
-        }
+        // ❌ PLUS OBLIGATOIRES
+        'surfaceCultivee'    => 'nullable|numeric',
+        'uniteSurface'       => 'nullable|string|max:50',
+        'quantiteDisponible' => 'nullable|string|max:255',
 
-        if ($userType === 'producer') {
-            $rules = array_merge($rules, [
-                'responsibleFirstName' => 'nullable|string|max:255',
-                'responsibleLastName'  => 'required|string|max:255',
-                'province'             => 'required|string|max:255',
-                'productionTypes'      => 'required',
-                'producerPhone'        => 'required|string',
-                'identityDocument'     => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
-            ]);
-        }
+        'isWhatsApp'    => 'nullable|boolean',
+        'pieceIdentite' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:5120',
 
-        $validator = Validator::make($request->all(), $rules);
+        // Consommateur
+        'address'     => 'nullable|string|max:255',
+        'postal_code' => 'nullable|string|max:20',
+        ], [
+            'acceptTerms.accepted' => 'Vous devez accepter les conditions d’utilisation',
+        ]);
+
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors' => $validator->errors(),
+                'errors'  => $validator->errors()
             ], 422);
         }
 
-        $firstName = $userType === 'consumer' ? $request->first_name : ($request->responsibleFirstName ?? '');
-        $lastName  = $userType === 'consumer' ? $request->last_name  : $request->responsibleLastName;
-
-        $identityPath = null;
-        if ($request->hasFile('identityDocument')) {
-            $identityPath = $request->file('identityDocument')->store('identity_documents', 'public');
+        // Vérification email unique (MongoDB safe)
+        if (User::where('email', $request->email)->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cet email est déjà utilisé'
+            ], 422);
         }
 
-        $user = User::create([
-            'first_name' => $firstName,
-            'last_name'  => $lastName,
-            'email'      => $request->email,
-            'password'   => Hash::make($request->password),
-            'phone'      => $request->phone ?? $request->producerPhone,
-            'role'       => $userType,
-            'status'     => 'active',
-            'country'    => 'Gabon',
+        // Mapper rôle
+        $role = $this->mapUserTypeToRole($request->userType);
 
-            // Producer specific
-            'company_name'      => $request->structureName,
-            'province'          => $request->province,
-            'production_city'   => $request->productionCity,
-            'production_village'=> $request->productionVillage,
-            'production_types'  => $request->productionTypes,
-            'identity_document' => $identityPath,
-        ]);
+        // Données communes
+        $userData = [
+            'first_name'  => $request->first_name,
+            'last_name'   => $request->last_name,
+            'email'       => $request->email,
+            'password'    => Hash::make($request->password),
+            'phone'       => $request->phone,
+            'role'        => $role,
+            'status'      => 'active',
+            'is_verified' => false,
+            'city'        => $request->city,
+            'country'     => 'Gabon',
+            'address'     => $request->address,
+            'postal_code' => $request->postal_code,
+        ];
 
+        // Données producteur
+        if ($role === 'producer') {
+            $userData = array_merge($userData, [
+                'business_name'      => $request->nomStructure,
+                'province'           => $request->province,
+                'production_city'    => $request->cityProduction,
+                'production_village' => $request->villageProduction,
+                'production_types'   => $request->typesProduction,
+                'cultivated_area'    => (string) $request->surfaceCultivee,
+                'area_unit'          => $request->uniteSurface,
+                'available_quantity' => $request->quantiteDisponible,
+                'is_whatsapp'        => $request->isWhatsApp ?? false,
+            ]);
+
+            if ($request->hasFile('pieceIdentite')) {
+                $userData['identity_document'] =
+                    $request->file('pieceIdentite')->store('identity_documents', 'public');
+            }
+        }
+
+        // Création utilisateur MongoDB
+        $user = User::create($userData);
+
+        // JWT Token
         $token = JWTAuth::fromUser($user);
 
         return response()->json([
             'success' => true,
             'message' => 'Inscription réussie',
             'data' => [
-                'user' => $user,
-                'token' => $token,
+                'user'       => $user,
+                'token'      => $token,
                 'token_type' => 'Bearer',
             ]
         ], 201);
     }
 
     /**
-     * Connexion d'un utilisateur
+     * LOGIN
      */
     public function login(Request $request)
     {
@@ -111,7 +141,7 @@ class AuthController extends Controller
         } catch (JWTException $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Impossible de créer le token'
+                'message' => 'Erreur lors de la création du token'
             ], 500);
         }
 
@@ -119,67 +149,52 @@ class AuthController extends Controller
             'success' => true,
             'message' => 'Connexion réussie',
             'data' => [
-                'token' => $token,
+                'token'      => $token,
                 'token_type' => 'Bearer',
-                'user' => auth()->user()
+                'user'       => auth()->user()
             ]
         ]);
     }
 
     /**
-     * Récupérer l'utilisateur connecté
+     * UTILISATEUR CONNECTÉ
      */
-    public function user(Request $request)
+    public function user()
     {
         return response()->json([
             'success' => true,
-            'data' => auth()->user()
+            'data'    => auth()->user()
         ]);
     }
 
     /**
-     * Déconnexion (révoque le token)
+     * LOGOUT (JWT stateless)
      */
-    public function logout(Request $request)
+    public function logout()
     {
         try {
-            $token = JWTAuth::getToken();
-
-            if (!$token) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Token non fourni'
-                ], 400);
-            }
-
-            // Vérifier si le token est valide (stateless)
-            JWTAuth::parseToken()->check(); // renverra une exception si invalide ou expiré
+            JWTAuth::invalidate(JWTAuth::getToken());
 
             return response()->json([
                 'success' => true,
-                'message' => 'Déconnexion réussie (stateless)'
+                'message' => 'Déconnexion réussie'
             ]);
-        } catch (TokenExpiredException $e) {
+        } catch (TokenExpiredException|TokenInvalidException|JWTException $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Token expiré'
+                'message' => 'Token invalide ou expiré'
             ], 401);
-        } catch (TokenInvalidException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Token invalide'
-            ], 401);
-        } catch (JWTException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Problème avec le token'
-            ], 400);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreur interne',
-                'error' => $e->getMessage()
-            ], 500);
         }
+    }
+
+    /**
+     * Mapper userType → role
+     */
+    private function mapUserTypeToRole(string $userType): string
+    {
+        return match ($userType) {
+            'producteur', 'producer' => 'producer',
+            default                  => 'consumer',
+        };
     }
 }

@@ -2,12 +2,15 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
+use MongoDB\Laravel\Eloquent\Model;
+use MongoDB\Laravel\Eloquent\SoftDeletes;
 
 class OrderStatusHistory extends Model
 {
-    use HasFactory;
+    use SoftDeletes;
+
+    protected $connection = 'mongodb';
+    protected $collection = 'order_status_histories';
 
     protected $fillable = [
         'order_id',
@@ -17,13 +20,14 @@ class OrderStatusHistory extends Model
         'changed_by'
     ];
 
+    /* ---------- RELATIONS ---------- */
     public function order()
     {
-        return $this->belongsTo(Order::class);
+        return $this->belongsTo(Order::class, 'order_id', '_id');
     }
 
     public function changedBy()
     {
-        return $this->belongsTo(User::class, 'changed_by');
+        return $this->belongsTo(User::class, 'changed_by', '_id');
     }
 }

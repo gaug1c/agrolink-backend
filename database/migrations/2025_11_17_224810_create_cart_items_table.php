@@ -12,11 +12,10 @@ return new class extends Migration {
             $collection->integer('quantity')->default(1);
             $collection->timestamps();
         });
-
     }
 
     public function down(): void
     {
-        Schema::connection('mongodb')->dropIfExists('jobs');
+        Schema::connection('mongodb')->dropIfExists('cart_items');
     }
 };
